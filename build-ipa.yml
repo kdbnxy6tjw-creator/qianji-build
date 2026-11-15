@@ -1,0 +1,87 @@
+name: build-qianji-v2-unsigned-ipa
+
+# 云端 macOS runner 自带完整 Xcode + iOS platform（不需要下载 iOS 17.5 组件）。
+# 产出未签名 IPA，下载到本地后用 TrollStore 安装，巨魔会自行伪签名。
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 打印工具链与可用 SDK
+        run: |
+          xcodebuild -version
+          echo "--- iOS SDK ---"
+          xcodebuild -showsdks | grep -i iphoneos || true
+          echo "--- 版本标识 ---"
+          cat VERSION.md | head -4
+          echo "--- Swift 文件数 ---"
+          find . -name '*.swift' | wc -l
+
+      - name: 编译（未签名，真机 arm64）
+        run: |
+          set -euo pipefail
+          rm -rf build
+          mkdir -p build
+          xcodebuild \
+            -project MoneyNote.xcodeproj \
+            -scheme QianJi \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build 2>&1 | tee build/xcodebuild.log
+          grep -q '\*\* BUILD SUCCEEDED \*\*' build/xcodebuild.log
+
+      - name: 组装 Payload 并注入 App 图标
+        run: |
+          set -euo pipefail
+          APP="$(find build/DerivedData -type d -name 'QianJi.app' -print -quit)"
+          [ -n "$APP" ] && [ -f "$APP/QianJi" ] || {
+            echo "❌ 没找到可用 .app"; find build -maxdepth 6 -type d | head -40; exit 1;
+          }
+          echo "产物: $APP"
+          lipo -info "$APP/QianJi"
+
+          rm -rf build/Payload
+          mkdir -p build/Payload
+          cp -RL "$APP" build/Payload/
+          BUNDLE="build/Payload/QianJi.app"
+
+          # 图标是散落 PNG（不经过 actool），直接拷进 .app
+          cp Icons/*.png "$BUNDLE/"
+          echo "图标: $(find "$BUNDLE" -maxdepth 1 -name '*.png' | wc -l | tr -d ' ') 个 PNG"
+
+          # 清掉可能指向空 Assets.car 的 catalog 引用，强制走 CFBundleIcons
+          /usr/libexec/PlistBuddy -c "Delete :CFBundleIconName" "$BUNDLE/Info.plist" 2>/dev/null || true
+          plutil -lint "$BUNDLE/Info.plist"
+          echo "版本: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$BUNDLE/Info.plist")"
+
+          (cd build && zip -qry QianJi-v2.0.0-unsigned.ipa Payload)
+
+      - name: 出包自检
+        run: |
+          set -euo pipefail
+          IPA="build/QianJi-v2.0.0-unsigned.ipa"
+          [ -f "$IPA" ] || { echo "❌ 没有 IPA"; exit 1; }
+          unzip -Z1 "$IPA" | grep -qx 'Payload/QianJi.app/QianJi' || { echo "❌ 缺主二进制"; exit 1; }
+          unzip -Z1 "$IPA" | grep -qx 'Payload/QianJi.app/AppIcon60x60@2x.png' || { echo "❌ 缺图标"; exit 1; }
+          unzip -Z1 "$IPA" | grep -qx 'Payload/QianJi.app/Info.plist' || { echo "❌ 缺 Info.plist"; exit 1; }
+          echo "✅ 自检通过  $(du -h "$IPA" | cut -f1)"
+
+      - name: 上传 IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: QianJi-v2.0.0-unsigned-ipa
+          path: build/QianJi-v2.0.0-unsigned.ipa
+          if-no-files-found: error
