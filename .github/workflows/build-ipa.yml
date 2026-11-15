@@ -1,0 +1,33 @@
+name: iOS Build IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: List project files (debug)
+        run: find . -maxdepth 3 -type f | head -50
+
+      - name: Build unsigned app
+        run: |
+          chmod +x scripts/*.sh
+          ./scripts/build_unsigned_ipa.sh
+
+      - name: Verify IPA
+        run: |
+          if [ ! -f QianJi-v2.0.0.ipa ]; then
+            echo "ERROR: IPA not generated"
+            exit 1
+          fi
+          unzip -l QianJi-v2.0.0.ipa | grep -E "Payload/QianJi.app/(QianJi|Info.plist|AppIcon)"
+          echo "IPA verified OK"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: QianJi-IPA
+          path: QianJi-v2.0.0.ipa
