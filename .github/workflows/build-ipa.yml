@@ -5,44 +5,67 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
 
-      - name: List project files (debug)
-        run: find . -maxdepth 3 -type f | head -80
+      - name: List files (debug)
+        run: |
+          echo "--- root ---"
+          ls -la
+          echo "--- xcodeproj/xcworkspace ---"
+          find . -maxdepth 3 \( -name "*.xcodeproj" -o -name "*.xcworkspace" \) -print
+          echo "--- schemes ---"
+          find . -name "*.xcscheme" -print
 
       - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_16.2.app || sudo xcode-select -s /Applications/Xcode_16.1.app || true
-
-      - name: Show toolchain
-        run: xcodebuild -version; swift --version
-
-      - name: Build unsigned app (direct xcodebuild)
         run: |
-          chmod +x scripts/*.sh
-          xcodebuild \
-            -project MoneyNote.xcodeproj \
-            -scheme QianJi \
+          sudo xcode-select -s /Applications/Xcode_15.4.app || true
+          xcodebuild -version
+
+      - name: Resolve project args
+        id: proj
+        run: |
+          PROJ=$(find . -maxdepth 2 -name "MoneyNote.xcodeproj" -type d | head -1)
+          WS=$(find . -maxdepth 2 -name "*.xcworkspace" -type d | head -1)
+          if [ -n "$WS" ]; then
+            echo "args=-workspace $WS" >> $GITHUB_OUTPUT
+          elif [ -n "$PROJ" ]; then
+            echo "args=-project $PROJ" >> $GITHUB_OUTPUT
+          else
+            echo "No .xcodeproj/.xcworkspace found!" && exit 1
+          fi
+          cat $GITHUB_OUTPUT
+
+      - name: Find scheme
+        id: sch
+        run: |
+          S=$(find . -name "*.xcscheme" | head -1 | sed 's/.*\///;s/\.xcscheme//')
+          echo "scheme=$S" >> $GITHUB_OUTPUT
+          echo "Using scheme: $S"
+
+      - name: Build archive (unsigned)
+        run: |
+          xcodebuild ${{ steps.proj.outputs.args }} \
+            -scheme "${{ steps.sch.outputs.scheme }}" \
             -configuration Release \
             -destination 'generic/platform=iOS' \
-            -archivePath $RUNNER_TEMP/QianJi.xcarchive \
+            -archivePath "$RUNNER_TEMP/QianJi.xcarchive" \
             clean archive CODE_SIGNING_ALLOWED=NO
 
-      - name: Export unsigned IPA
+      - name: Pack IPA (unsigned)
         run: |
-          mkdir -p Payload
-          cp -R $RUNNER_TEMP/QianJi.xcarchive/Products/Applications/QianJi.app Payload/
+          APP=$(find "$RUNNER_TEMP/QianJi.xcarchive/Products/Applications" -name "*.app" -maxdepth 1 | head -1)
+          [ -n "$APP" ] || { echo "No .app in archive"; exit 1; }
+          rm -rf Payload && mkdir -p Payload
+          cp -R "$APP" Payload/
           zip -qr QianJi-v2.0.0.ipa Payload
 
-      - name: Verify IPA
+      - name: Verify & upload
         run: |
-          test -f QianJi-v2.0.0.ipa
-          unzip -l QianJi-v2.0.0.ipa | grep -E "Payload/QianJi.app/(QianJi|Info.plist)"
-          echo "IPA verified OK"
-
-      - name: Upload IPA
-        uses: actions/upload-artifact@v4
+          unzip -l QianJi-v2.0.0.ipa | grep -E "Payload/.+\.app/(Info.plist|[^/]+)$"
+          echo OK
+      - uses: actions/upload-artifact@v4
         with:
           name: QianJi-IPA
           path: QianJi-v2.0.0.ipa
